@@ -189,5 +189,12 @@ export const heartbeatRuns = pgTable(
       sql`(${table.contextSnapshot} ->> 'taskKey')`,
       table.createdAt.desc(),
     ),
+    companySecretRedactionsIdx: index("heartbeat_runs_company_secret_redactions_idx")
+      .on(table.companyId)
+      .where(sql`${table.contextSnapshot} ? 'paperclipSecretRedactions'`),
+    companyCtxPaperclipIssueIdx: index("heartbeat_runs_company_ctx_paperclip_issue_idx").on(
+      table.companyId,
+      sql`((${table.contextSnapshot} -> 'paperclipIssue') ->> 'id')`,
+    ),
   }),
 );
