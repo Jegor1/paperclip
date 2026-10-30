@@ -1336,7 +1336,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       .where(and(
         eq(issues.companyId, workspace.companyId),
         sql<boolean>`
-          ${issues.id} IN (
+          ${issues.id} = ANY(ARRAY(
             WITH RECURSIVE issue_tree(id) AS (
               SELECT ${issues.id}
               FROM ${issues}
@@ -1349,7 +1349,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
               WHERE child.company_id = ${workspace.companyId}
             )
             SELECT id FROM issue_tree
-          )
+          ))
         `,
       ));
   }
