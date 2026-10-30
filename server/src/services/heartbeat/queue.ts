@@ -209,6 +209,7 @@ export interface HeartbeatQueueDependencies extends Pick<HeartbeatRetryDependenc
 }
 
 const HEARTBEAT_MAX_CONCURRENT_RUNS_DEFAULT = AGENT_DEFAULT_MAX_CONCURRENT_RUNS;
+const STRANDED_QUEUE_REVISIT_MS = 5 * 60 * 1000;
 
 const HEARTBEAT_MAX_CONCURRENT_RUNS_MIN = 1;
 
@@ -1746,6 +1747,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     return cancelled;
   }
 
+  const strandedQueueVisits = new Map<string, number>();
+
   async function resumeQueuedRuns() {
     if ((await getSchedulingSuppression()).suppressed) return;
     await resumeExecutionWaitComments();
@@ -1784,7 +1787,13 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt' is null`,
         cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined))
       .orderBy(asc(agentWakeupRequests.updatedAt)).limit(50);
+    const visitedAt = Date.now();
+    for (const [wakeId, at] of strandedQueueVisits) {
+      if (visitedAt - at >= STRANDED_QUEUE_REVISIT_MS) strandedQueueVisits.delete(wakeId);
+    }
     for (const { wake } of strandedQueues) {
+      if (strandedQueueVisits.has(wake.id)) continue;
+      strandedQueueVisits.set(wake.id, visitedAt);
       if (!queuedCommentIdsFromWakePayload(wake.payload).length &&
           !await readQueuedInteractionResponse(db, wake.companyId, String(wake.payload?.issueId), wake.payload)) continue;
       const [latest] = await db.select().from(heartbeatRuns).where(and(
