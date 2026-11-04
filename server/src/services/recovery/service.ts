@@ -3512,15 +3512,26 @@ export function recoveryService(
             issue.companyId,
             issue.id,
           );
-          await issuesSvc.update(issue.id, {
-            status: "blocked",
-            blockedByIssueIds: [
-              ...new Set([
-                ...blockerIds,
-                ...healthyChildren.map((child) => child.id),
-              ]),
-            ],
-          });
+          try {
+            await issuesSvc.update(issue.id, {
+              status: "blocked",
+              blockedByIssueIds: [
+                ...new Set([
+                  ...blockerIds,
+                  ...healthyChildren.map((child) => child.id),
+                ]),
+              ],
+            });
+          } catch (err) {
+            // A child that the source already blocks would close a cycle.
+            // One bad pair must not abort startup recovery for every issue.
+            logger.warn(
+              { err, issueId: issue.id, actionId: action.id },
+              "recovery: cannot block source on its children, skipping",
+            );
+            result.skipped += 1;
+            continue;
+          }
         }
         const resolved = await recoveryActionsSvc.resolveActiveForIssue({
           companyId: action.companyId,
