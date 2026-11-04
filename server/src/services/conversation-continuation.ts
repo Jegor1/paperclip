@@ -1,5 +1,5 @@
 import { hasRequiredWorkspaceRecovery } from "./workspace-restore-recovery-state.js";
-import { and, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { environmentLeases, heartbeatRunEvents, heartbeatRuns, issueRecoveryActions, type Db } from "@paperclipai/db";
 import { readProcessStartedAt } from "./hot-restart.js";
 import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
@@ -64,13 +64,23 @@ export async function runUsedConversationAdapter(db: Db, run: typeof heartbeatRu
  * An agent's current adapter can differ from the one that executed this run.
  * Missing evidence retains the hold; the current agent is never a fallback.
  */
+/** The run id recorded in a recovery action's evidence, as a uuid (null when
+ * it is missing or malformed). Comparing `heartbeat_runs.id::text` to the JSON
+ * text instead hides the primary key from the planner: it then hashes every
+ * terminal run (and its run events) for each recovery-action read, and the
+ * inflated cost estimate also triggers JIT compilation on every call. */
+export function recoveryEvidenceRunIdUuid() {
+  return sql`(case when ${issueRecoveryActions.evidence}->>'runId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    then (${issueRecoveryActions.evidence}->>'runId')::uuid end)`;
+}
+
 export function conversationRecoveryActionPredicate() {
   return and(
     eq(issueRecoveryActions.cause, "legacy_execution_requires_reconciliation"),
     sql`exists (
       select 1 from ${heartbeatRuns}
       where ${heartbeatRuns.companyId} = ${issueRecoveryActions.companyId}
-        and ${heartbeatRuns.id}::text = ${issueRecoveryActions.evidence}->>'runId'
+        and ${heartbeatRuns.id} = ${recoveryEvidenceRunIdUuid()}
         and coalesce(${heartbeatRuns.nativeIssueId}::text, ${heartbeatRuns.contextSnapshot}->>'issueId') = ${issueRecoveryActions.sourceIssueId}::text
         and ${heartbeatRuns.runtimeMode} = 'legacy'
         and coalesce(${heartbeatRuns.resultJson}->>'workspaceRestoreFailure', '') <> 'restore_unsafe_archive'
@@ -85,6 +95,19 @@ export function conversationRecoveryActionPredicate() {
         )}
     )`,
   );
+}
+
+const UUID_TEXT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Same rows as `coalesce(native_issue_id::text, context_snapshot->>'issueId') = issueId`,
+ * written so Postgres can use the native-issue and context-issue indexes instead of
+ * reading (and detoasting the context of) every terminal run of the company. */
+function runIssueIdEquals(issueId: string) {
+  const contextMatch = and(isNull(heartbeatRuns.nativeIssueId), sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`);
+  // native_issue_id::text is lowercase, so only a lowercase uuid can match it.
+  return UUID_TEXT.test(issueId) && issueId === issueId.toLowerCase()
+    ? or(eq(heartbeatRuns.nativeIssueId, issueId), contextMatch)!
+    : contextMatch!;
 }
 
 /** OS liveness probes do not signal or stop the process. Unknown ownership holds. */
@@ -111,7 +134,7 @@ export async function getConversationOwnershipBlocker(db: Db, companyId: string,
     .where(and(
       eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.runtimeMode, "legacy"),
       conversationRunPredicate(),
-      sql`coalesce(${heartbeatRuns.nativeIssueId}::text, ${heartbeatRuns.contextSnapshot}->>'issueId') = ${issueId}`,
+      runIssueIdEquals(issueId),
       inArray(heartbeatRuns.status, ["failed", "timed_out", "interrupted", "cancelled"]),
       or(isNotNull(heartbeatRuns.processPid), isNotNull(heartbeatRuns.processGroupId), activeLease,
         sql`${heartbeatRuns.resultJson}->'workspaceRestoreRecovery'->>'schema' = 'paperclip.workspace-restore-recovery.v1'`),

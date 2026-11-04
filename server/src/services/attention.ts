@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, notInArray, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, notInArray, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -1094,6 +1094,8 @@ function resolveBlockingIssue(
   return null;
 }
 
+const UUID_TEXT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function readRunIssueId(contextSnapshot: Record<string, unknown> | null) {
   const issueId = contextSnapshot?.issueId ?? contextSnapshot?.taskId;
   return typeof issueId === "string" && issueId.length > 0 ? issueId : null;
@@ -1731,26 +1733,43 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
         ),
         issueImageMap(db, companyId, failedIssueIds, readCondition),
         oldestFailedRunCreatedAt && failedAgentIds.length > 0
-          ? db
-            .select({
-              agentId: heartbeatRuns.agentId,
-              createdAt: heartbeatRuns.createdAt,
-              // Project just the ids readRunIssueId needs; pulling the whole
-              // context_snapshot detoasts megabytes per feed build.
-              runIssueId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`,
-              runTaskId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'taskId'`,
-            })
-            .from(heartbeatRuns)
-            .where(and(
-              eq(heartbeatRuns.companyId, companyId),
-              inArray(heartbeatRuns.agentId, failedAgentIds),
-              gt(heartbeatRuns.createdAt, oldestFailedRunCreatedAt),
-            ))
+          ? (() => {
+            // Only the newest run per (agent, task) of the failed runs' own
+            // tasks matters. Read it from the indexed issue_id column, grouped
+            // in SQL: scanning every run of these agents and detoasting each
+            // context_snapshot took seconds per feed build. Runs without an
+            // issue_id fall back to their context ids (only when needed).
+            const failedUuidIssueIds = [...new Set(failedIssueIds.filter(
+              (id): id is string => typeof id === "string" && UUID_TEXT.test(id),
+            ))];
+            const needUnscoped = failedIssueIds.some((id) => !id || !UUID_TEXT.test(id));
+            const issueScope = or(
+              failedUuidIssueIds.length > 0 ? inArray(heartbeatRuns.issueId, failedUuidIssueIds) : undefined,
+              needUnscoped ? isNull(heartbeatRuns.issueId) : undefined,
+            );
+            if (!issueScope) return Promise.resolve([]);
+            const runIssueKey = sql<string | null>`coalesce(${heartbeatRuns.issueId}::text,
+              case when ${heartbeatRuns.issueId} is null then coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId', ${heartbeatRuns.contextSnapshot} ->> 'taskId') end)`;
+            return db
+              .select({
+                agentId: heartbeatRuns.agentId,
+                runIssueKey,
+                createdAt: sql<Date>`max(${heartbeatRuns.createdAt})`.mapWith(heartbeatRuns.createdAt),
+              })
+              .from(heartbeatRuns)
+              .where(and(
+                eq(heartbeatRuns.companyId, companyId),
+                inArray(heartbeatRuns.agentId, failedAgentIds),
+                gt(heartbeatRuns.createdAt, oldestFailedRunCreatedAt),
+                issueScope,
+              ))
+              .groupBy(heartbeatRuns.agentId, runIssueKey);
+          })()
           : Promise.resolve([]),
       ]);
       const latestRunCreatedAtByKey = new Map<string, Date>();
       for (const newerRun of newerRuns) {
-        const newerRunIssueId = readRunIssueId({ issueId: newerRun.runIssueId, taskId: newerRun.runTaskId });
+        const newerRunIssueId = newerRun.runIssueKey ? newerRun.runIssueKey : null;
         const newerRunKey = `${newerRun.agentId}:${newerRunIssueId ?? ""}`;
         const latestCreatedAt = latestRunCreatedAtByKey.get(newerRunKey);
         if (!latestCreatedAt || newerRun.createdAt > latestCreatedAt) {

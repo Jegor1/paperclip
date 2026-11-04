@@ -173,4 +173,66 @@ describeEmbeddedPostgres("issue list routes updatedSince filter", () => {
       error: "updatedSince must be a valid ISO 8601 timestamp when provided",
     });
   });
+  it("projects each row to the requested fields", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: uniqueIssuePrefix(),
+      requireBoardApprovalForNewAgents: false,
+    });
+    await seedCloudTenantMember(companyId);
+    await db.insert(issues).values({
+      id: randomUUID(),
+      companyId,
+      title: "Projected issue",
+      description: "A long description the caller did not ask for",
+      status: "todo",
+      priority: "medium",
+    });
+
+    const app = createApp(companyId);
+    const res = await request(app)
+      .get(`/api/companies/${companyId}/issues`)
+      .query({ status: "todo", fields: "title,status" });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual([{ title: "Projected issue", status: "todo" }]);
+
+    const compact = await request(app)
+      .get(`/api/companies/${companyId}/issues`)
+      .query({ view: "compact", fields: "title" });
+    expect(compact.status, JSON.stringify(compact.body)).toBe(200);
+    expect(compact.body).toEqual([{ title: "Projected issue" }]);
+
+    const invalid = await request(app)
+      .get(`/api/companies/${companyId}/issues`)
+      .query({ fields: "title;drop" });
+    expect(invalid.status).toBe(400);
+  });
+
+  it("rejects issue-list parameters an agent guessed instead of ignoring them", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: uniqueIssuePrefix(),
+      requireBoardApprovalForNewAgents: false,
+    });
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as any).actor = { type: "agent", agentId: randomUUID(), companyId, source: "agent_jwt" };
+      next();
+    });
+    app.use("/api", issueRoutes(db, {} as any));
+    app.use(errorHandler);
+
+    const res = await request(app)
+      .get(`/api/companies/${companyId}/issues`)
+      .query({ statuses: "todo", page_size: "500" });
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(res.body.error).toContain("statuses");
+    expect(res.body.error).toContain("page_size");
+    expect(res.body.supportedParameters).toContain("status");
+  });
 });

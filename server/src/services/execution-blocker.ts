@@ -14,8 +14,10 @@ export function executionBlockerPredicate() {
   return and(
     not(conversationRecoveryActionPredicate()!),
     inArray(issueRecoveryActions.cause, [...EXECUTION_RECONCILIATION_CAUSES]),
-    or(inArray(issueRecoveryActions.status, ["active", "escalated"]),
-      sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`),
+    // Literal statuses (not bind parameters) so a cached generic plan can still
+    // prove the partial index on open/blocked recovery actions applies.
+    sql`(${issueRecoveryActions.status} in ('active', 'escalated')
+      or ${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked')`,
   );
 }
 

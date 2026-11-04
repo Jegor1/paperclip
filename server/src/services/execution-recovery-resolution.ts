@@ -1,6 +1,6 @@
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { randomUUID } from "node:crypto";
-import { claimedAdapterType, conversationRecoveryActionPredicate, getConversationOwnershipBlocker } from "./conversation-continuation.js";
+import { claimedAdapterType, conversationRecoveryActionPredicate, getConversationOwnershipBlocker, recoveryEvidenceRunIdUuid } from "./conversation-continuation.js";
 import { persistActivity } from "./activity-log.js";
 import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 import { logger } from "../middleware/logger.js";
@@ -348,10 +348,8 @@ export async function settleUnrecoverableExecutions(
   // Keep their evidence and record the policy change in the task's activity log.
   const obsoleteConversationHold = and(
     conversationRecoveryActionPredicate(),
-    or(
-      inArray(issueRecoveryActions.status, ["active", "escalated"]),
-      sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`,
-    ),
+    sql`(${issueRecoveryActions.status} in ('active', 'escalated')
+      or ${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked')`,
   );
   await db.transaction(async tx => {
     const foldable = await tx.select().from(issueRecoveryActions).where(obsoleteConversationHold)
@@ -392,7 +390,7 @@ export async function settleUnrecoverableExecutions(
       heartbeatRuns,
       and(
         eq(heartbeatRuns.companyId, issueRecoveryActions.companyId),
-        sql`${heartbeatRuns.id}::text = ${issueRecoveryActions.evidence}->>'runId'`,
+        sql`${heartbeatRuns.id} = ${recoveryEvidenceRunIdUuid()}`,
         sql`coalesce(${heartbeatRuns.nativeIssueId}::text, ${heartbeatRuns.contextSnapshot}->>'issueId') = ${issueRecoveryActions.sourceIssueId}::text`,
       ),
     )
@@ -406,7 +404,9 @@ export async function settleUnrecoverableExecutions(
     .where(
       and(
         not(conversationRecoveryActionPredicate()!),
-        inArray(issueRecoveryActions.status, ["active", "escalated"]),
+        // Literal statuses keep the open-recovery partial index usable under
+        // cached generic plans; this sweep has no company filter.
+        sql`${issueRecoveryActions.status} in ('active', 'escalated')`,
         eq(issueRecoveryActions.kind, "active_run_watchdog"),
         inArray(issueRecoveryActions.cause, [
           ...EXECUTION_RECONCILIATION_CAUSES,

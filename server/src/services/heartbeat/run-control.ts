@@ -637,7 +637,9 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     const waits = await db.select({ wake: agentWakeupRequests })
       .from(agentWakeupRequests)
       .innerJoin(issues, and(eq(issues.companyId, agentWakeupRequests.companyId),
-        sql`${issues.id}::text = ${agentWakeupRequests.payload}->>'issueId'`,
+        // uuid comparison keeps the issues primary key usable (the ::text cast scanned
+        // the assignee's issues for every deferred wake).
+        sql`${issues.id} = (case when ${agentWakeupRequests.payload}->>'issueId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (${agentWakeupRequests.payload}->>'issueId')::uuid end)`,
         eq(issues.assigneeAgentId, agentWakeupRequests.agentId)))
       .innerJoin(companies, and(eq(companies.id, issues.companyId), eq(companies.status, "active")))
       .where(and(exists(db.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(

@@ -2904,6 +2904,39 @@ class AutoApprovalIssueMissingError extends Error {
   }
 }
 
+// Query parameters the company issue list understands. Agents that guess a
+// name (page_size, statuses, created_after…) used to get the default 500 rows
+// of every status back silently, and then filtered them in the model context.
+const ISSUE_LIST_QUERY_KEYS = new Set([
+  "afterId", "assigneeAgentId", "assigneeUserId", "attention", "createdFromIssueId", "descendantOf",
+  "excludeRoutineExecutions", "executionWorkspaceId", "fields", "hasPlanDocument", "inboxArchivedByUserId",
+  "includeBlockedBy", "includeBlockedInboxAttention", "includeLiveDescendantSummary", "includePluginOperations",
+  "includeRoutineExecutions", "labelId", "limit", "offset", "originId", "originKind", "originKindPrefix",
+  "parentId", "parentIssueId", "participantAgentId", "projectId", "q", "sortDir", "sortField", "status",
+  "touchedByUserId", "unreadForUserId", "updatedSince", "view", "workspaceId",
+]);
+const ISSUE_LIST_FIELD_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
+
+/** `fields=identifier,title,status` keeps only those keys on each row. */
+function parseIssueListFields(raw: unknown): string[] | null | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "string") return null;
+  const fields = [...new Set(raw.split(",").map((field) => field.trim()).filter(Boolean))];
+  if (fields.length === 0 || fields.length > 64 || fields.some((field) => !ISSUE_LIST_FIELD_NAME.test(field))) return null;
+  return fields;
+}
+
+function projectIssueListRows(rows: unknown, fields: string[] | undefined) {
+  if (!fields || !Array.isArray(rows)) return rows;
+  return rows.map((row) => {
+    const out: Record<string, unknown> = {};
+    for (const field of fields) {
+      if (row && typeof row === "object" && Object.hasOwn(row, field)) out[field] = (row as Record<string, unknown>)[field];
+    }
+    return out;
+  });
+}
+
 function toCompactIssue(issue: any): CompactIssue {
   return {
     externalConversationState: issue.externalConversationState ?? null,
@@ -8273,6 +8306,25 @@ export function issueRoutes(
       });
       return;
     }
+    if (req.actor.type === "agent") {
+      const unknownFilters = Object.keys(req.query).filter((key) => !ISSUE_LIST_QUERY_KEYS.has(key));
+      if (unknownFilters.length > 0) {
+        res.status(400).json({
+          error: `Unknown issue-list parameter(s): ${unknownFilters.join(", ")}. ` +
+            "Filter on the server instead of reading the whole list, e.g. " +
+            "?status=todo,in_progress&assigneeAgentId=<id>&limit=50&fields=identifier,title,status",
+          supportedParameters: [...ISSUE_LIST_QUERY_KEYS].sort(),
+        });
+        return;
+      }
+    }
+    const listFields = parseIssueListFields(req.query.fields);
+    if (listFields === null) {
+      res.status(400).json({
+        error: "fields must be a comma-separated list of issue property names (e.g. identifier,title,status)",
+      });
+      return;
+    }
     const assigneeUserFilterRaw = req.query.assigneeUserId as
       string | undefined;
     const touchedByUserFilterRaw = req.query.touchedByUserId as
@@ -8611,10 +8663,14 @@ export function issueRoutes(
 
     if (coordinated.response.kind === "compact") {
       res.setHeader("Cache-Control", coordinated.response.cacheControl);
-      res.setHeader("ETag", coordinated.response.etag);
+      // A projected body is a different representation of the same rows.
+      const listEtag = listFields && coordinated.response.etag.endsWith('"')
+        ? `${coordinated.response.etag.slice(0, -1)}.f-${createHash("sha256").update(listFields.join(",")).digest("hex").slice(0, 12)}"`
+        : coordinated.response.etag;
+      res.setHeader("ETag", listEtag);
       const etagMatched = requestMatchesEtag(
         req.header("if-none-match"),
-        coordinated.response.etag,
+        listEtag,
       );
       logIssueListRequest({
         req,
@@ -8633,7 +8689,7 @@ export function issueRoutes(
         res.status(304).end();
         return;
       }
-      res.json(coordinated.response.body);
+      res.json(projectIssueListRows(coordinated.response.body, listFields));
       return;
     }
 
@@ -8648,7 +8704,7 @@ export function issueRoutes(
       etagOutcome: "none",
       identicalInFlightCount: coordinated.identicalInFlightCount,
     });
-    res.json(coordinated.response.body);
+    res.json(projectIssueListRows(coordinated.response.body, listFields));
   });
 
   router.get("/companies/:companyId/issues/count", async (req, res) => {
