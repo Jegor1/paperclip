@@ -6,6 +6,9 @@ import { AgentLifecycleConflict, compatibilityStatus, transition } from "../doma
 import type { LifecycleEffects } from "./effects.js";
 import type { LifecycleStore } from "../application/ports.js";
 
+/** Pending lifecycle steps retry every 2 s for this many attempts, then every minute. */
+export const LIFECYCLE_FAST_RETRY_ATTEMPTS = 15;
+
 export function assertRootDatabase(db: Db) {
   if ("nestedIndex" in db) throw new AgentLifecycleConflict("Lifecycle commands require the root database connection");
 }
@@ -131,10 +134,16 @@ export function createLifecycleStore(db: Db, effects: LifecycleEffects): Lifecyc
       return rows.length > 0;
     },
     async defer(agent, owner, error, now) {
+      // A pending step (runs still stopping) is retried quickly at first. One that
+      // stays pending for many attempts, e.g. a stop waiting on stale process
+      // evidence, is re-checked once a minute instead of every sweep: each check
+      // reads the agents' run history.
+      const attempts = Number(agent.lifecycleOperation?.attempts ?? 0);
+      const delayMs = error || attempts > LIFECYCLE_FAST_RETRY_ATTEMPTS ? 60_000 : 2_000;
       const rows = await db.update(agents).set({
         lifecycleError: error,
         lifecycleOperation: sql`(${agents.lifecycleOperation} - 'leaseOwner' - 'leaseUntil')
-          || jsonb_build_object('retryAt', ${new Date(now.getTime() + (error ? 60_000 : 2_000)).toISOString()}::text)`,
+          || jsonb_build_object('retryAt', ${new Date(now.getTime() + delayMs).toISOString()}::text)`,
         updatedAt: now,
       }).where(and(eq(agents.id, agent.id), eq(agents.lifecycleVersion, agent.lifecycleVersion),
         sql`${agents.lifecycleOperation}->>'leaseOwner' = ${owner}`)).returning({ id: agents.id });
