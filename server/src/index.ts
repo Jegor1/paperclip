@@ -1166,6 +1166,7 @@ async function startServerWithDatabaseTeardown(
   let heartbeatSchedulerStopped = false;
   let heartbeatSchedulerInterval: ReturnType<typeof setInterval> | null = null;
   const heartbeatSchedulerInFlight = new Set<Promise<void>>();
+  let periodicHeartbeatRecoveryInFlight = false;
   const trackHeartbeatSchedulerWork = (work: Promise<unknown>) => {
     const finishIdleWork = beginIdleTrackedWork();
     let tracked: Promise<void>;
@@ -1795,9 +1796,14 @@ async function startServerWithDatabaseTeardown(
         trackHeartbeatSchedulerWork(app.locals.toolGateway.cleanupExpiredSessions().catch((err: unknown) => logger.error({ err }, "gateway token cleanup failed")));
 
         if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
-        if (!(await heartbeat.resolveSchedulingSuppression()).suppressed) {
+        if (periodicHeartbeatRecoveryInFlight) {
+          logger.debug("periodic heartbeat recovery still running; skipping this tick");
+        } else if (!(await heartbeat.resolveSchedulingSuppression()).suppressed) {
           // Periodically reap orphaned runs (5-min staleness threshold) and make sure
-          // persisted queued work is still being driven forward.
+          // persisted queued work is still being driven forward. One pass at a time:
+          // a pass slower than the tick must not stack concurrent passes that repeat
+          // the same reads and make every pass slower still.
+          periodicHeartbeatRecoveryInFlight = true;
           trackHeartbeatSchedulerWork(heartbeat
             .reapOrphanedRuns({ staleThresholdMs: 5 * 60 * 1000 })
             .then(() => heartbeat.promoteDueScheduledRetries())
@@ -1845,6 +1851,9 @@ async function startServerWithDatabaseTeardown(
             })
             .catch((err) => {
               logger.error({ err }, "periodic heartbeat recovery failed");
+            })
+            .finally(() => {
+              periodicHeartbeatRecoveryInFlight = false;
             }));
         }
       })().catch((err) => {

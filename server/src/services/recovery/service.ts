@@ -3380,9 +3380,23 @@ export function recoveryService(
 
   async function latestRecoveryActionRun(
     action: typeof issueRecoveryActions.$inferSelect,
-  ) {
+  ): Promise<LatestIssueRun> {
+    // Runs every recovery tick for each open disposition repair. Without an index on
+    // recoveryActionId this walks the company's runs newest first; never also
+    // ship their output excerpts and runner profiles.
     return db
-      .select()
+      .select({
+        id: heartbeatRuns.id,
+        agentId: heartbeatRuns.agentId,
+        status: heartbeatRuns.status,
+        error: heartbeatRuns.error,
+        errorCode: heartbeatRuns.errorCode,
+        contextSnapshot: heartbeatRuns.contextSnapshot,
+        livenessState: heartbeatRuns.livenessState,
+        resultJson: heartbeatRuns.resultJson,
+        startedAt: heartbeatRuns.startedAt,
+        createdAt: heartbeatRuns.createdAt,
+      })
       .from(heartbeatRuns)
       .where(
         and(
