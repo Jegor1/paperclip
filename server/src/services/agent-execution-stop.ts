@@ -9,7 +9,26 @@ import { isCancelledNativeStartup } from "./cancelled-native-startup.js";
 /** Cancellation changes admission. Process and lease evidence controls cleanup. */
 export async function agentExecutionsHaveStopped(db: Db, agentIds: string[]) {
   if (!agentIds.length) return true;
-  const runs = await db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.agentId, agentIds));
+  // Lifecycle stop retries poll this for every stopped agent. Read only the
+  // columns the process and lease checks need: the full rows (context snapshot,
+  // result, output excerpts) of an agent's whole run history are megabytes of
+  // TOAST to decompress and ship on each attempt. The few cancelled runs that
+  // reach the startup and acknowledgement proofs load their full row by id.
+  const runs = await db.select({
+    id: heartbeatRuns.id,
+    companyId: heartbeatRuns.companyId,
+    status: heartbeatRuns.status,
+    runtimeMode: heartbeatRuns.runtimeMode,
+    startedAt: heartbeatRuns.startedAt,
+    processPid: heartbeatRuns.processPid,
+    processGroupId: heartbeatRuns.processGroupId,
+    processStartedAt: heartbeatRuns.processStartedAt,
+    controllerLeaseExpiresAt: heartbeatRuns.controllerLeaseExpiresAt,
+  }).from(heartbeatRuns).where(inArray(heartbeatRuns.agentId, agentIds));
+  const fullRun = async (runId: string) => {
+    const [row] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    return row;
+  };
   const runIds = db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(inArray(heartbeatRuns.agentId, agentIds));
   const leases = await db.select().from(environmentLeases).where(or(
     inArray(environmentLeases.heartbeatRunId, runIds),
@@ -51,13 +70,18 @@ export async function agentExecutionsHaveStopped(db: Db, agentIds: string[]) {
     }
     if (processAlive || groupAlive) return false;
     if (run.status !== "cancelled" || !run.startedAt) continue;
-    if (run.runtimeMode === "native" && !run.processPid && !run.processGroupId &&
-        !await hasNativeLocalProcessStop(db, run.companyId, run.id) &&
-        !await isCancelledNativeStartup(db, run, coordinators.find(row => row.runId === run.id))) return false;
-    if (run.runtimeMode === "legacy" && !run.processPid && !run.processGroupId &&
-        (run.resultJson?.executionCancellation as Record<string, unknown> | undefined)?.state !== "acknowledged" &&
-        !(run.executionStage === "settled" && !await runUsedConversationAdapter(db, run)) &&
-        !await isCancelledNativeStartup(db, run, coordinators.find(row => row.runId === run.id))) return false;
+    if (run.processPid || run.processGroupId) continue;
+    if (run.runtimeMode === "native" && !await hasNativeLocalProcessStop(db, run.companyId, run.id)) {
+      const full = await fullRun(run.id);
+      if (!full || !await isCancelledNativeStartup(db, full, coordinators.find(row => row.runId === run.id))) return false;
+    }
+    if (run.runtimeMode === "legacy") {
+      const full = await fullRun(run.id);
+      if (!full) return false;
+      if ((full.resultJson?.executionCancellation as Record<string, unknown> | undefined)?.state !== "acknowledged" &&
+          !(full.executionStage === "settled" && !await runUsedConversationAdapter(db, full)) &&
+          !await isCancelledNativeStartup(db, full, coordinators.find(row => row.runId === run.id))) return false;
+    }
   }
   // Release an expired owner only after its cancelled execution has stop proof.
   for (const coordinator of abandoned) {

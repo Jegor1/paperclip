@@ -20,7 +20,7 @@ import { agents, approvals, projects, issues, heartbeatRuns, nativeRunFinalizati
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../../__tests__/helpers/embedded-postgres.js";
 import { createAgentLifecycle, configureAgentLifecycle } from "../../../services/agent-lifecycle.js";
-import { createLifecycleStore as createStore } from "../adapters/postgres.js";
+import { createLifecycleStore as createStore, LIFECYCLE_FAST_RETRY_ATTEMPTS } from "../adapters/postgres.js";
 import { transition } from "../domain/policy.js";
 import type { LifecycleAgent } from "../application/ports.js";
 import { budgetService } from "../../../services/budgets.js";
@@ -421,6 +421,21 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(await createLifecycleStore(db).change(agent.id, "reconcile")).toBeNull();
     });
     expect(await createLifecycleStore(db).change(agent.id, "reconcile")).not.toBeNull();
+  });
+
+  it("re-checks a step that stays pending once a minute after the fast retries", async () => {
+    const work = worker(async agent => agent.lifecycleState === "verifying" ? "pending" : "complete");
+    const agent = await hire();
+    const retryDelay = async () => {
+      const before = Date.now(); await work.process(agent.id);
+      const operation = (await current(agent.id)).lifecycleOperation!;
+      return new Date(operation.retryAt!).getTime() - before;
+    };
+    expect(await retryDelay()).toBeLessThan(10_000);
+    await db.update(agents).set({ lifecycleOperation: sql`${agents.lifecycleOperation} - 'retryAt'
+      || jsonb_build_object('attempts', ${LIFECYCLE_FAST_RETRY_ATTEMPTS}::int)` }).where(eq(agents.id, agent.id));
+    expect(await retryDelay()).toBeGreaterThan(50_000);
+    expect((await current(agent.id)).lifecycleState).toBe("verifying");
   });
 
   it("retains the failed phase and the same operation for retry", async () => {

@@ -5109,7 +5109,15 @@ export function heartbeatService(
 
   async function stopInvocationsForAgents(agentIds: string[], reason: string) {
     await cancelInvocationsForAgentsInternal(agentIds, reason);
-    const runs = await db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.agentId, agentIds));
+    // Retried by the lifecycle worker until every run has stopped: read the
+    // stop and lease fields only, never the TOASTed history of each run.
+    const runs = await db.select({
+      id: heartbeatRuns.id,
+      companyId: heartbeatRuns.companyId,
+      agentId: heartbeatRuns.agentId,
+      status: heartbeatRuns.status,
+      controllerLeaseExpiresAt: heartbeatRuns.controllerLeaseExpiresAt,
+    }).from(heartbeatRuns).where(inArray(heartbeatRuns.agentId, agentIds));
     const leasesToRelease = await db.select({ runId: environmentLeases.heartbeatRunId }).from(environmentLeases)
       .innerJoin(heartbeatRuns, eq(heartbeatRuns.id, environmentLeases.heartbeatRunId))
       .where(and(inArray(heartbeatRuns.agentId, agentIds),

@@ -25,6 +25,8 @@ import { queuedCommentIdsFromWakePayload } from "./issue-queued-comment-queue.js
 
 type Run = typeof heartbeatRuns.$inferSelect;
 const terminal = ["failed", "interrupted", "timed_out", "cancelled"];
+// Canonical (lowercase) uuid text, as heartbeat_runs.id::text renders it.
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function processStopped(pid: number): boolean {
   try { process.kill(pid, 0); return false; }
@@ -161,10 +163,12 @@ export async function admitExplicitNativeContinuation(input: {
   for (const action of actions) {
     const runId = action.evidence.runId ?? action.evidence.sourceRunId;
     if (typeof runId !== "string") return blocked("source_missing", "The stopped run could not be identified. Your message is saved.");
-    // Text comparison keeps malformed historical evidence a hold, not a UUID cast error.
-    let [run] = await db.select().from(heartbeatRuns).where(and(
-      eq(heartbeatRuns.companyId, companyId), sql`${heartbeatRuns.id}::text = ${runId}`,
-    ));
+    // Malformed historical evidence stays a hold, not a UUID cast error. Checking the
+    // shape here instead of comparing id::text keeps the primary key usable: the
+    // text comparison walked every run of the company.
+    let [run] = UUID_PATTERN.test(runId) ? await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.id, runId),
+    )) : [];
     if (!run || run.agentId !== agentId || !terminal.includes(run.status) ||
         (run.nativeIssueId ?? run.contextSnapshot?.issueId) !== issueId ||
         !run.finishedAt) return blocked("source_unavailable", "The previous execution has not finished or its owner changed. Your message is saved.");
