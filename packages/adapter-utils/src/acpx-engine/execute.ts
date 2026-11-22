@@ -2867,6 +2867,8 @@ interface RuntimeSettlementPlan {
 
 class AcpxHandshakeTimeoutError extends Error {
   readonly acpxHandshakeGuardKind = "timeout" as const;
+  /** Transient: sandbox may still be starting or the model provider is slow. */
+  readonly retryable = true;
   constructor() {
     super("The ACP startup handshake did not finish before the startup deadline.");
     this.name = "AcpxHandshakeTimeoutError";
@@ -2875,6 +2877,8 @@ class AcpxHandshakeTimeoutError extends Error {
 
 class AcpxHandshakeTransportLostError extends Error {
   readonly acpxHandshakeGuardKind = "transport_lost" as const;
+  /** Transient: duplex channel drop during startup is usually momentary. */
+  readonly retryable = true;
   constructor() {
     super("The sandbox duplex control channel was lost during the ACP startup handshake.");
     this.name = "AcpxHandshakeTransportLostError";

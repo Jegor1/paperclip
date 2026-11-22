@@ -241,7 +241,10 @@ export function readHeartbeatRunErrorFamily(
   if (
     run.errorCode === "codex_transient_upstream" ||
     run.errorCode === "claude_transient_upstream" ||
-    run.errorCode === "codex_harness_crash"
+    run.errorCode === "codex_harness_crash" ||
+    run.errorCode === "acpx_handshake_timeout" ||
+    run.errorCode === "acpx_handshake_transport_lost" ||
+    run.errorCode === "duplex_channel_lost"
   ) {
     return "transient_upstream";
   }
